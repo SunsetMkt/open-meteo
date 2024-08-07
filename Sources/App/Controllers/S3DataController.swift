@@ -156,9 +156,11 @@ struct S3DataController: RouteCollection {
         if let nginxSendfilePrefix = Self.nginxSendfilePrefix {
             let response = Response()
             //let response = req.fileio.streamFile(at: abspath)
-            response.headers.add(name: "X-Accel-Redirect", value: "/\(nginxSendfilePrefix)\(pathNoData)")
-            // Bytes per second download speed limit. Set to 50 MB/s.
-            response.headers.add(name: "X-Accel-Limit-Rate", value: "\((params.rate ?? 50)*1024*1024)")
+            response.headers.add(name: "X-Accel-Redirect", value: "/\(nginxSendfilePrefix)/\(pathNoData)")
+            if let rate = params.rate {
+                // Bytes per second download speed limit
+                response.headers.add(name: "X-Accel-Limit-Rate", value: "\((rate)*1024*1024)")
+            }
             return response
         }
         let response = req.fileio.streamFile(at: "\(OpenMeteo.dataDirectory)\(pathNoData)")

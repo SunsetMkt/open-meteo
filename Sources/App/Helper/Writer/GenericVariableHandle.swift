@@ -25,7 +25,7 @@ struct GenericVariableHandle {
     }
     
     /// Process concurrently
-    static func convert(logger: Logger, domain: GenericDomain, createNetcdf: Bool, run: Timestamp, handles: [Self], concurrent: Int) async throws {
+    static func convert(logger: Logger, domain: GenericDomain, createNetcdf: Bool, run: Timestamp?, handles: [Self], concurrent: Int) async throws {
         let startTime = Date()
         if concurrent > 1 {
             try await handles.groupedPreservedOrder(by: {"\($0.variable)"}).evenlyChunked(in: concurrent).foreachConcurrent(nConcurrent: concurrent, body: {
@@ -39,26 +39,25 @@ struct GenericVariableHandle {
     }
     
     /// Process each variable and update time-series optimised files
-    static func convert(logger: Logger, domain: GenericDomain, createNetcdf: Bool, run: Timestamp, handles: [Self]) throws {
-        guard let timeMinMax = handles.minAndMax(by: {$0.time < $1.time}) else {
-            logger.warning("No data to convert")
-            return
-        }
-        // `timeMinMax.min.time` has issues with `skip`
-        /// Start time (timeMinMax.min) might be before run time in case of MF wave which contains hindcast data
-        let startTime = min(run, timeMinMax.min.time)
-        let time = TimerangeDt(range: startTime...timeMinMax.max.time, dtSeconds: domain.dtSeconds)
-        logger.info("Convert timerange \(time.prettyString())")
-        
+    static func convert(logger: Logger, domain: GenericDomain, createNetcdf: Bool, run: Timestamp?, handles: [Self]) throws {
         let grid = domain.grid
         let nLocations = grid.count
         
         for (_, handles) in handles.groupedPreservedOrder(by: {"\($0.variable)"}) {
+            guard let timeMinMax = handles.minAndMax(by: {$0.time < $1.time}) else {
+                logger.warning("No data to convert")
+                return
+            }
+            /// `timeMinMax.min.time` has issues with `skip`
+            /// Start time (timeMinMax.min) might be before run time in case of MF wave which contains hindcast data
+            let startTime = min(run ?? timeMinMax.min.time, timeMinMax.min.time)
+            let time = TimerangeDt(range: startTime...timeMinMax.max.time, dtSeconds: domain.dtSeconds)
+            
             let variable = handles[0].variable
             let skip = handles[0].skipHour0 ? 1 : 0
             let nMembers = (handles.max(by: {$0.member < $1.member})?.member ?? 0) + 1
             let nMembersStr = nMembers > 1 ? " (\(nMembers) nMembers)" : ""
-            let progress = ProgressTracker(logger: logger, total: nLocations * nMembers, label: "Convert \(variable.rawValue)\(nMembersStr)")
+            let progress = ProgressTracker(logger: logger, total: nLocations * nMembers, label: "Convert \(variable.rawValue)\(nMembersStr) \(time.prettyString())")
             
             let om = OmFileSplitter(domain, nMembers: nMembers, chunknLocations: nMembers > 1 ? nMembers : nil)
             let nLocationsPerChunk = om.nLocationsPerChunk
@@ -159,6 +158,15 @@ actor VariablePerMemberStorage<V: Hashable> {
         func with(variable: V, timestamp: Timestamp? = nil) -> VariableAndMember {
             .init(variable: variable, timestamp: timestamp ?? self.timestamp, member: self.member)
         }
+        
+        var timestampAndMember: TimestampAndMember {
+            return .init(timestamp: timestamp, member: member)
+        }
+    }
+    
+    struct TimestampAndMember: Equatable {
+        let timestamp: Timestamp
+        let member: Int
     }
     
     var data = [VariableAndMember: Array2D]()
@@ -179,6 +187,77 @@ actor VariablePerMemberStorage<V: Hashable> {
         return data[variable]
     }
 }
+
+
+extension VariablePerMemberStorage {
+    /// Calculate wind speed and direction from U/V components for all available members an timesteps.
+    /// if `trueNorth` is given, correct wind direction due to rotated grid projections. E.g. DMI HARMONIE AROME using LambertCC
+    func calculateWindSpeed(u: V, v: V, outSpeedVariable: GenericVariable, outDirectionVariable: GenericVariable?, writer: OmFileWriter, trueNorth: [Float]? = nil) throws -> [GenericVariableHandle] {
+        return try self.data
+            .groupedPreservedOrder(by: {$0.key.timestampAndMember})
+            .flatMap({ (t, handles) -> [GenericVariableHandle] in
+                guard let u = handles.first(where: {$0.key.variable == u}), let v = handles.first(where: {$0.key.variable == v}) else {
+                    return []
+                }
+                let speed = zip(u.value.data, v.value.data).map(Meteorology.windspeed)
+                let speedHandle = GenericVariableHandle(
+                    variable: outSpeedVariable,
+                    time: t.timestamp,
+                    member: t.member,
+                    fn: try writer.writeTemporary(compressionType: .p4nzdec256, scalefactor: outSpeedVariable.scalefactor, all: speed),
+                    skipHour0: false
+                )
+                
+                if let outDirectionVariable {
+                    var direction = Meteorology.windirectionFast(u: u.value.data, v: v.value.data)
+                    if let trueNorth {
+                        direction = zip(direction, trueNorth).map({($0-$1+360).truncatingRemainder(dividingBy: 360)})
+                    }
+                    let directionHandle = GenericVariableHandle(
+                        variable: outDirectionVariable,
+                        time: t.timestamp,
+                        member: t.member,
+                        fn: try writer.writeTemporary(compressionType: .p4nzdec256, scalefactor: outDirectionVariable.scalefactor, all: direction),
+                        skipHour0: false
+                    )
+                    return [speedHandle, directionHandle]
+                }
+                return [speedHandle]
+            }
+        )
+    }
+    
+    /// Generate elevation file
+    /// - `elevation`: in metres
+    /// - `landMask` 0 = sea, 1 = land. Fractions below 0.5 are considered sea.
+    func generateElevationFile(elevation: V, landmask: V, domain: GenericDomain) throws {
+        let elevationFile = domain.surfaceElevationFileOm
+        if FileManager.default.fileExists(atPath: elevationFile.getFilePath()) {
+            return
+        }
+        guard var elevation = self.data.first(where: {$0.key.variable == elevation})?.value.data,
+              let landMask = self.data.first(where: {$0.key.variable == landmask})?.value.data else {
+            return
+        }
+        
+        try elevationFile.createDirectory()
+        for i in elevation.indices {
+            if elevation[i] >= 9000 {
+                fatalError("Elevation greater 90000")
+            }
+            if landMask[i] < 0.5 {
+                // mask sea
+                elevation[i] = -999
+            }
+        }
+        #if Xcode
+        try Array2D(data: elevation, nx: domain.grid.nx, ny: domain.grid.ny).writeNetcdf(filename: domain.surfaceElevationFileOm.getFilePath().replacingOccurrences(of: ".om", with: ".nc"))
+        #endif
+        
+        try OmFileWriter(dim0: domain.grid.ny, dim1: domain.grid.nx, chunk0: 20, chunk1: 20).write(file: elevationFile.getFilePath(), compressionType: .p4nzdec256, scalefactor: 1, all: elevation)
+    }
+}
+
 
 /// Keep values from previous timestep. Actori isolated, because of concurrent data conversion
 actor GribDeaverager {
@@ -211,7 +290,7 @@ actor GribDeaverager {
             // Store data for next timestep
             let previous = set(variable: variable, member: member, step: currentStep, data: grib2d.array.data)
             // For the overall first timestep or the first step of each repeating section, deaveraging is not required
-            if let previous, previous.step != startStep {
+            if let previous, previous.step != startStep, currentStep > previous.step {
                 for l in previous.data.indices {
                     grib2d.array.data[l] -= previous.data[l]
                 }
@@ -226,7 +305,7 @@ actor GribDeaverager {
             // Store data for next timestep
             let previous = set(variable: variable, member: member, step: currentStep, data: grib2d.array.data)
             // For the overall first timestep or the first step of each repeating section, deaveraging is not required
-            if let previous, previous.step != startStep {
+            if let previous, previous.step != startStep, currentStep > previous.step {
                 let deltaHours = Float(currentStep - startStep)
                 let deltaHoursPrevious = Float(previous.step - startStep)
                 for l in previous.data.indices {

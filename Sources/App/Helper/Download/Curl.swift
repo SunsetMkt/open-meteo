@@ -3,6 +3,7 @@ import Vapor
 import AsyncHTTPClient
 import CHelper
 import NIOCore
+import _NIOFileSystem
 
 enum CurlError: Error {
     //case noGribMessagesMatch
@@ -11,6 +12,7 @@ enum CurlError: Error {
     case sizeTooSmall
     case didNotGetAllGribMessages(got: Int, expected: Int)
     case downloadFailed(code: HTTPStatus)
+    case fileNotFound
     case timeoutReached
     case timeoutPerChunkReached
     case futimes(error: String)
@@ -247,12 +249,13 @@ final class Curl {
         if !FileManager.default.fileExists(atPath: cacheFile) {
             try await self.download(url: url, toFile: cacheFile, bzip2Decode: false, range: range, minSize: minSize, cacheDirectory: nil, nConcurrent: 1, headers: headers)
         }
-        guard let data = try FileHandle(forReadingAtPath: cacheFile)?.readToEnd() else {
-            fatalError("Could not read cached file")
-        }
+        
+        let fn = try await FileSystem.shared.openFile(forReadingAt: FilePath(cacheFile))
+        let fstat = try await fn.fileHandle.info()
+        
         var headers = HTTPHeaders()
-        headers.add(name: "content-length", value: "\(data.count)")
-        return HTTPClientResponse(status: .ok, headers: headers, body: .bytes(ByteBuffer(data: data)))
+        headers.add(name: "content-length", value: "\(fstat.size)")
+        return HTTPClientResponse(status: .ok, headers: headers, body: .stream(fn.readChunks()))
     }
     
     /// Use http-async http client to download and store to file. If the file already exists, it will be deleted before
@@ -288,12 +291,12 @@ final class Curl {
     
     /// Use http-async http client to download
     /// `minSize` retry download if file is too small. Happens a lot with NOAA servers while files are uploaded while downloaded
-    func downloadInMemoryAsync(url: String, range: String? = nil, minSize: Int?, bzip2Decode: Bool = false, nConcurrent: Int = 1, deadLineHours: Double? = nil) async throws -> ByteBuffer {
+    func downloadInMemoryAsync(url: String, range: String? = nil, minSize: Int?, bzip2Decode: Bool = false, nConcurrent: Int = 1, deadLineHours: Double? = nil, headers: [(String, String)] = []) async throws -> ByteBuffer {
         let deadline = deadLineHours.map { Date().addingTimeInterval(TimeInterval($0 * 3600)) } ?? deadline
         let timeout = TimeoutTracker(logger: logger, deadline: deadline)
         while true {
             // Start the download and wait for the header
-            let response = try await initiateDownload(url: url, range: range, minSize: minSize, deadline: deadline, nConcurrent: nConcurrent, waitAfterLastModifiedBeforeDownload: waitAfterLastModifiedBeforeDownload)
+            let response = try await initiateDownload(url: url, range: range, minSize: minSize, deadline: deadline, nConcurrent: nConcurrent, waitAfterLastModifiedBeforeDownload: waitAfterLastModifiedBeforeDownload, headers: headers)
             
             // Retry failed file transfers after this point
             do {
@@ -430,3 +433,24 @@ final actor TotalBytesTransfered {
         logger.info("Finished downloading \(bytes.bytesHumanReadable) in \(startTime.timeElapsedPretty())")
     }
 }
+
+
+/*extension HTTPClientRequest {
+    /// Return a uniqe cache key for this request including url, headers and body
+    func getCacheKey() async throws -> String {
+        var data = Data()
+        if let url = url.data(using: .utf8) {
+            data.append(url)
+        }
+        let headerString = headers.sorted(by: <).map({"\($0)=\($1)"}).joined(separator: ";")
+        if let headers = headerString.data(using: .utf8) {
+            data.append(headers)
+        }
+        if let body {
+            for try await body in body {
+                data.append(contentsOf: body.readableBytesView)
+            }
+        }
+        return SHA256.hash(data: data).hex
+    }
+}*/

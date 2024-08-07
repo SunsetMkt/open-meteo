@@ -19,6 +19,7 @@ enum DomainRegistry: String, CaseIterable {
     case copernicus_dem90
     case copernicus_cerra
     case copernicus_era5
+    case copernicus_era5_ensemble
     case copernicus_era5_daily
     case copernicus_era5_land
     case copernicus_era5_land_daily
@@ -68,6 +69,9 @@ enum DomainRegistry: String, CaseIterable {
     case ecmwf_aifs025
     case ecmwf_wam025
     case ecmwf_wam025_ensemble
+    case ecmwf_ifs_analysis
+    case ecmwf_ifs_analysis_long_window
+    case ecmwf_ifs_long_window
     
     case jma_msm
     case jma_gsm
@@ -92,6 +96,10 @@ enum DomainRegistry: String, CaseIterable {
     case arpae_cosmo_2i
     case arpae_cosmo_2i_ruc
     case arpae_cosmo_5m
+    
+    case knmi_harmonie_arome_europe
+    case knmi_harmonie_arome_netherlands
+    case dmi_harmonie_arome_europe
     
     var directory: String {
         return "\(OpenMeteo.dataDirectory)\(rawValue)/"
@@ -121,12 +129,20 @@ enum DomainRegistry: String, CaseIterable {
             return Dem90()
         case .ecmwf_ifs:
             return CdsDomain.ecmwf_ifs
+        case .ecmwf_ifs_analysis_long_window:
+            return CdsDomain.ecmwf_ifs_analysis_long_window
+        case .ecmwf_ifs_analysis:
+            return CdsDomain.ecmwf_ifs_analysis
+        case .ecmwf_ifs_long_window:
+            return CdsDomain.ecmwf_ifs_long_window
         case .copernicus_era5:
             return CdsDomain.era5
         case .copernicus_era5_land:
             return CdsDomain.era5_land
         case .copernicus_era5_ocean:
             return CdsDomain.era5_ocean
+        case .copernicus_era5_ensemble:
+            return CdsDomain.era5_ensemble
         case .dwd_ewam:
             return IconWaveDomain.ewam
         case .cmc_gem_gdps:
@@ -247,6 +263,12 @@ enum DomainRegistry: String, CaseIterable {
             return GfsDomain.gfswave025
         case .ncep_gefswave025:
             return GfsDomain.gfswave025_ens
+        case .knmi_harmonie_arome_europe:
+            return KnmiDomain.harmonie_arome_europe
+        case .knmi_harmonie_arome_netherlands:
+            return KnmiDomain.harmonie_arome_netherlands
+        case .dmi_harmonie_arome_europe:
+            return DmiDomain.harmonie_arome_europe
         }
     }
 }

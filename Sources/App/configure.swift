@@ -6,7 +6,7 @@ struct OpenMeteo {
     static var dataDirectory = {
         if let dir = Environment.get("DATA_DIRECTORY") {
             guard dir.last == "/" else {
-                fatalError("TEMP_DIRECTORY must end with a trailing slash")
+                fatalError("DATA_DIRECTORY must end with a trailing slash")
             }
             return dir
         }
@@ -51,10 +51,10 @@ extension Application {
     }
     
     /// Create a new HTTP client instance. `shutdown` must be called after using it
-    func makeNewHttpClient(httpVersion: HTTPClient.Configuration.HTTPVersion = .automatic) -> HTTPClient {
+    func makeNewHttpClient(httpVersion: HTTPClient.Configuration.HTTPVersion = .automatic, redirectConfiguration: HTTPClient.Configuration.RedirectConfiguration? = nil) -> HTTPClient {
         // try again with very high timeouts, so only the curl internal timers are used
         var configuration = HTTPClient.Configuration(
-            redirectConfiguration: .follow(max: 5, allowCycles: false),
+            redirectConfiguration: redirectConfiguration ?? .follow(max: 5, allowCycles: false),
             timeout: .init(connect: .seconds(30), read: .minutes(5)),
             connectionPool: .init(idleTimeout: .minutes(10)))
         configuration.httpVersion = httpVersion
@@ -91,6 +91,8 @@ public func configure(_ app: Application) throws {
     app.asyncCommands.use(DownloadDemCommand(), as: "download-dem")
     app.asyncCommands.use(DownloadCamsCommand(), as: "download-cams")
     app.asyncCommands.use(MeteoFranceDownload(), as: "download-meteofrance")
+    app.asyncCommands.use(KnmiDownload(), as: "download-knmi")
+    app.asyncCommands.use(DmiDownload(), as: "download-dmi")
     app.asyncCommands.use(DownloadArpaeCommand(), as: "download-arpae")
     app.asyncCommands.use(SeasonalForecastDownload(), as: "download-seasonal-forecast")
     app.asyncCommands.use(GfsDownload(), as: "download-gfs")
